@@ -49,6 +49,67 @@ def norm_phone(s):
     return None
 
 
+async def place_order(ctx, u, b):
+    """Shared order logic for /api/order (initData) and bot web_app_data (keyboard-button launch)."""
+    uid = int(u["id"])
+    db = ctx.db
+    err = lambda m: {"ok": False, "error": m}
+    if not ctx.is_open():
+        return err(f"Hozir yopiqmiz. Ish vaqti: {ctx.hours()}")
+    name = str(b.get("name", "")).strip()[:64]
+    phone = norm_phone(str(b.get("phone", "")))
+    otype = b.get("otype")
+    payment = {"cash": "💵 Naqd", "card": "💳 Karta"}.get(b.get("payment"))
+    address = str(b.get("address", "")).strip()[:300]
+    lat = lon = None
+    try:
+        if b.get("lat") is not None and b.get("lon") is not None:
+            lat, lon = float(b["lat"]), float(b["lon"])
+            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                lat = lon = None
+    except (TypeError, ValueError):
+        lat = lon = None
+    want_loc = bool(b.get("send_location")) and otype == "delivery" and lat is None
+    if len(name) < 2:
+        return err("Ismingizni kiriting")
+    if not phone:
+        return err("Telefon raqam noto'g'ri. Masalan: +998 90 123 45 67")
+    if otype not in ("delivery", "pickup") or not payment:
+        return err("Ma'lumotlar to'liq emas")
+    if otype == "delivery" and len(address) < 5 and not want_loc and lat is None:
+        return err("Manzilni yozing yoki lokatsiya yuborishni tanlang")
+    items = b.get("items") or []
+    if not isinstance(items, list) or not items or len(items) > 50:
+        return err("Savat bo'sh")
+    # rebuild cart server-side with real prices
+    with db.lock:
+        db.c.execute("DELETE FROM cart WHERE user_id=?", (uid,))
+        for x in items:
+            try:
+                iid, q = int(x["id"]), int(x["qty"])
+            except (KeyError, ValueError, TypeError):
+                continue
+            it = db.item(iid)
+            if it and it["available"] and 0 < q <= 99:
+                db.c.execute("INSERT OR REPLACE INTO cart VALUES(?,?,?)", (uid, iid, q))
+        db.c.execute("""INSERT INTO users(id, full_name, username, created) VALUES(?,?,?,datetime('now'))
+                        ON CONFLICT(id) DO NOTHING""",
+                     (uid, " ".join(filter(None, [u.get("first_name"), u.get("last_name")])), u.get("username")))
+        db.c.commit()
+    if not db.totals(uid, otype)[0]:
+        return err("Tanlangan taomlar hozir mavjud emas")
+    oid = db.create_order(uid, {"name": name, "phone": phone, "otype": otype, "payment": payment,
+                                "address": (address or ("📍 Lokatsiya yuborildi" if lat is not None else "📍 Lokatsiya kutilmoqda")) if otype == "delivery" else None,
+                                "lat": lat if otype == "delivery" else None, "lon": lon if otype == "delivery" else None,
+                                "comment": str(b.get("comment", "")).strip()[:500] or None})
+    if not oid:
+        return err("Savat bo'sh")
+    log.info("WebApp order #%s by %s", oid, uid)
+    o = db.order(oid)
+    await ctx.on_webapp_order(oid, want_loc)
+    return {"ok": True, "order_id": oid, "total": o["total"]}
+
+
 def make_app(ctx):
     """ctx: object with .db, .token, .bot, .is_open(), .hours(), .on_webapp_order(oid, want_loc) coroutine."""
     app = web.Application(client_max_size=256 * 1024)
@@ -120,64 +181,8 @@ def make_app(ctx):
 
     async def order(req):
         data, b = await auth(req)
-        u = data["user"]
-        uid = int(u["id"])
-        db = ctx.db
-        err = lambda m: web.json_response({"ok": False, "error": m}, status=400)
-        if not ctx.is_open():
-            return err(f"Hozir yopiqmiz. Ish vaqti: {ctx.hours()}")
-        name = str(b.get("name", "")).strip()[:64]
-        phone = norm_phone(str(b.get("phone", "")))
-        otype = b.get("otype")
-        payment = {"cash": "💵 Naqd", "card": "💳 Karta"}.get(b.get("payment"))
-        address = str(b.get("address", "")).strip()[:300]
-        lat = lon = None
-        try:
-            if b.get("lat") is not None and b.get("lon") is not None:
-                lat, lon = float(b["lat"]), float(b["lon"])
-                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-                    lat = lon = None
-        except (TypeError, ValueError):
-            lat = lon = None
-        want_loc = bool(b.get("send_location")) and otype == "delivery" and lat is None
-        if len(name) < 2:
-            return err("Ismingizni kiriting")
-        if not phone:
-            return err("Telefon raqam noto'g'ri. Masalan: +998 90 123 45 67")
-        if otype not in ("delivery", "pickup") or not payment:
-            return err("Ma'lumotlar to'liq emas")
-        if otype == "delivery" and len(address) < 5 and not want_loc and lat is None:
-            return err("Manzilni yozing yoki lokatsiya yuborishni tanlang")
-        items = b.get("items") or []
-        if not isinstance(items, list) or not items or len(items) > 50:
-            return err("Savat bo'sh")
-        # rebuild cart server-side with real prices
-        with db.lock:
-            db.c.execute("DELETE FROM cart WHERE user_id=?", (uid,))
-            for x in items:
-                try:
-                    iid, q = int(x["id"]), int(x["qty"])
-                except (KeyError, ValueError, TypeError):
-                    continue
-                it = db.item(iid)
-                if it and it["available"] and 0 < q <= 99:
-                    db.c.execute("INSERT OR REPLACE INTO cart VALUES(?,?,?)", (uid, iid, q))
-            db.c.execute("""INSERT INTO users(id, full_name, username, created) VALUES(?,?,?,datetime('now'))
-                            ON CONFLICT(id) DO NOTHING""",
-                         (uid, " ".join(filter(None, [u.get("first_name"), u.get("last_name")])), u.get("username")))
-            db.c.commit()
-        if not db.totals(uid, otype)[0]:
-            return err("Tanlangan taomlar hozir mavjud emas")
-        oid = db.create_order(uid, {"name": name, "phone": phone, "otype": otype, "payment": payment,
-                                    "address": (address or ("📍 Lokatsiya yuborildi" if lat is not None else "📍 Lokatsiya kutilmoqda")) if otype == "delivery" else None,
-                                    "lat": lat if otype == "delivery" else None, "lon": lon if otype == "delivery" else None,
-                                    "comment": str(b.get("comment", "")).strip()[:500] or None})
-        if not oid:
-            return err("Savat bo'sh")
-        log.info("WebApp order #%s by %s", oid, uid)
-        o = db.order(oid)
-        await ctx.on_webapp_order(oid, want_loc)
-        return web.json_response({"ok": True, "order_id": oid, "total": o["total"]})
+        res = await place_order(ctx, data["user"], b)
+        return web.json_response(res, status=200 if res.get("ok") else 400)
 
     async def health(req):
         return web.json_response({"ok": True})

@@ -185,6 +185,7 @@ textarea.fld{resize:none;height:72px}
 <script>
 const tg = window.Telegram && Telegram.WebApp;
 const inTG = !!(tg && tg.initData);
+const inKB = !!(tg && !tg.initData && tg.platform && tg.platform!=='unknown');
 const API = '';
 const $ = id => document.getElementById(id);
 const fmt = n => n.toLocaleString('ru-RU').replace(/,/g,' ').replace(/\u00a0/g,' ') + " so'm";
@@ -355,6 +356,8 @@ async function submit(){
   if(name.length<2) return err('Ismingizni kiriting');
   if(!validPhone(phone)) return err('Telefon raqamni to\'g\'ri kiriting: +998 90 123 45 67');
   if(st.otype==='delivery' && addr.length<5 && st.lat==null && !st.sendLoc) return err('Manzilni yozing yoki lokatsiya yuboring');
+  const payload={name,phone,otype:st.otype,payment:st.pay,address:addr,comment:$('fcom').value.trim(),lat:st.lat,lon:st.lon,send_location:st.sendLoc,items:Object.entries(cart).map(([id,q])=>({id:+id,qty:q}))};
+  if(!inTG && inKB){ cart={}; save(); hap('ok'); tg.sendData(JSON.stringify(payload)); return; }
   if(!inTG) return err('Buyurtma berish uchun ilovani Telegram ichida oching');
   st.sending=true; setMain('Yuborilmoqda...', true);
   try{
@@ -374,7 +377,7 @@ function closeApp(){ tg&&inTG ? tg.close() : show('menu'); }
 // ---- main button ----
 function setMain(text, progress){
   const bar=$('bar');
-  if(inTG && tg.MainButton){ const mb=tg.MainButton;
+  if((inTG||inKB) && tg.MainButton){ const mb=tg.MainButton;
     if(!text){ mb.hide(); return; }
     mb.setParams({text, color:'#FF5A1F', text_color:'#FFFFFF', is_visible:true, is_active:!progress});
     progress ? mb.showProgress(false) : mb.hideProgress();

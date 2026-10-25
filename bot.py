@@ -1,4 +1,5 @@
 """ZAM ZAM fast food — Telegram ordering bot (aiogram 3)."""
+import webserver
 import asyncio, html, logging, os, re, time, datetime as dt
 from logging.handlers import RotatingFileHandler
 
@@ -31,7 +32,10 @@ B_CANCEL, B_BACK = "❌ Bekor qilish", "⬅️ Orqaga"
 B_DELIVERY, B_PICKUP = "🚚 Yetkazib berish", "🏃 Olib ketish"
 B_CASH, B_CARD = "💵 Naqd", "💳 Karta"
 B_SKIP = "⏭ O'tkazib yuborish"
-MAIN_BUTTONS = {B_MENU, B_CART, B_ORDERS, B_CONTACT, B_ABOUT}
+MAIN_BUTTONS = {B_MENU, B_CART, B_ORDERS, B_CONTACT, B_ABOUT, "📋 Oddiy menyu"}
+
+
+WEB = {"url": None}
 
 
 def money(v):
@@ -43,8 +47,12 @@ def kb(rows, placeholder=None):
                                          for r in rows], resize_keyboard=True, input_field_placeholder=placeholder)
 
 
+B_SIMPLE = "📋 Oddiy menyu"
+
+
 def main_kb(uid=None):
-    rows = [[B_MENU], [B_CART, B_ORDERS], [B_CONTACT, B_ABOUT]]
+    first = KeyboardButton(text=B_MENU, web_app=WebAppInfo(url=WEB["url"] + "/")) if WEB.get("url") else B_MENU
+    rows = [[first], [B_CART, B_ORDERS], [B_CONTACT, B_ABOUT, B_SIMPLE]]
     if uid and db.is_admin(uid):
         rows.append(["⚙️ Admin panel"])
     return kb(rows, "Bo'limni tanlang 👇")
@@ -120,7 +128,6 @@ async def start(m: Message, state: FSMContext):
         await m.answer(hello + extra, reply_markup=main_kb(m.from_user.id))
 
 
-WEB = {"url": None}
 URL_FILE = os.path.join(BASE, "tunnel_url.txt")
 
 
@@ -234,8 +241,31 @@ async def replace_with_text(c: CallbackQuery, text, markup):
                 await c.message.answer(text, reply_markup=markup)
 
 
-@router.message(F.text == B_MENU)
 @router.message(Command("menu"))
+async def menu_cmd(m: Message):
+    if WEB["url"]:
+        return await m.answer("🍽 ZAM ZAM menyusini oching 👇", reply_markup=webapp_kb())
+    await menu(m)
+
+
+@router.message(F.web_app_data)
+async def on_web_app_data(m: Message):
+    import json as _j
+    try:
+        b = _j.loads(m.web_app_data.data)
+    except Exception:
+        return await m.answer("Ma'lumot noto'g'ri keldi, qayta urinib ko'ring.")
+    u = {"id": m.from_user.id, "first_name": m.from_user.first_name, "last_name": m.from_user.last_name,
+         "username": m.from_user.username}
+    ctx = type("C", (), {})()
+    ctx.db, ctx.is_open, ctx.hours = db, is_open, hours
+    ctx.on_webapp_order = lambda oid, want: on_webapp_order(m.bot, oid, want)
+    res = await webserver.place_order(ctx, u, b)
+    if not res.get("ok"):
+        await m.answer("❌ " + str(res.get("error")), reply_markup=main_kb(m.from_user.id))
+
+
+@router.message(F.text.in_({B_MENU, B_SIMPLE}))
 async def menu(m: Message):
     t = "🍽 <b>Menyu</b>\nBo'limni tanlang 👇"
     if not is_open():
