@@ -7,3 +7,5 @@ venv/
 photos/cache/
 .neon_url
 !seed/seed.db
+.gh_token
+.render_key
