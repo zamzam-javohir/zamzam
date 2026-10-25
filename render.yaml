@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: zamzam-bot
+    runtime: docker
+    plan: free
+    region: frankfurt
+    healthCheckPath: /health
+    envVars:
+      - key: ZAMZAM_APP_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: OWNER_ID
+        value: "5280407495"
