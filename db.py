@@ -194,6 +194,38 @@ def pg_schema():
     return s
 
 
+SEED_TABLES = ["settings", "users", "admins", "items", "orders", "order_items", "cart", "admin_msgs", "loc_wait"]
+
+
+def import_sqlite(c, src, log=lambda *a: None):
+    """Copy all rows from SQLite file `src` into Postgres connection `c` (PGConn). Replaces admins/items/orders."""
+    s = sqlite3.connect(src); s.row_factory = sqlite3.Row
+    have = {r[0] for r in s.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    c.execute("DELETE FROM admins")
+    for t in ("order_items", "admin_msgs", "cart", "loc_wait", "orders", "items"):
+        c.execute(f"DELETE FROM {t}")
+    for t in SEED_TABLES:
+        if t not in have:
+            continue
+        rows = s.execute(f"SELECT * FROM {t}").fetchall()
+        log(t, len(rows))
+        if not rows:
+            continue
+        cols = rows[0].keys()
+        pk = PG_PK.get(t)
+        sql = f"INSERT INTO {t}({', '.join(cols)}) VALUES({', '.join(['%s'] * len(cols))})"
+        if pk:
+            upd = ", ".join(f"{x}=EXCLUDED.{x}" for x in cols if x not in pk)
+            sql += f" ON CONFLICT({', '.join(pk)}) DO " + (f"UPDATE SET {upd}" if upd else "NOTHING")
+        for r in rows:
+            c.pg.execute(sql, tuple(r))
+    for t in SERIAL_TABLES:
+        c.pg.execute(f"SELECT setval('{t}_id_seq', GREATEST((SELECT COALESCE(MAX(id),0) FROM {t}), %s), true)",
+                     (1000 if t == "orders" else 1,))
+    c.commit()
+    s.close()
+
+
 class DB:
     def __init__(self, path=None, url=None):
         url = url if url is not None else os.environ.get("DATABASE_URL", "")
@@ -227,6 +259,12 @@ class DB:
             if self.pg:
                 self.c.executescript(pg_schema())
                 self.c.commit()
+                seed = os.environ.get("SEED_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "seed", "seed.db"))
+                if (os.path.exists(seed) and not self.one("SELECT 1 FROM items LIMIT 1")
+                        and not self.one("SELECT 1 FROM admins LIMIT 1")
+                        and not self.one("SELECT 1 FROM settings WHERE key<>'_seq_init' LIMIT 1")):
+                    import_sqlite(self.c, seed)
+                    print("Seeded Postgres from", seed)
                 if not self.one("SELECT 1 FROM orders LIMIT 1") and not self.one("SELECT 1 FROM settings WHERE key='_seq_init'"):
                     self.c.execute("SELECT setval('orders_id_seq', 1000, true)")  # order numbers start from 1001
                     self.c.execute("INSERT INTO settings VALUES('_seq_init','1') ON CONFLICT DO NOTHING")
